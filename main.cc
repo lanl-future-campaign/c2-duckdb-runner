@@ -176,11 +176,14 @@ void process_dir(const char* datadir, const char* filter, int j) {
   }
   closedir(dir);
   runner.Wait();
-  printf("Total rows: %d\n", runner.total());
-  printf("Done\n");
+  fprintf(stderr, "Query Predicate: %s\n", filter);
+  fprintf(stderr, "Total rows: %d\n", runner.total());
+  fprintf(stderr, "Done\n");
 }
 
 int main(int argc, char* argv[]) {
-  process_dir(argv[1], "ke>0.3", 32);
+  char tmp[50];
+  snprintf(tmp, sizeof(tmp), "ke > %s", argv[2]);
+  process_dir(argv[1], tmp, 32);
   return 0;
 }
