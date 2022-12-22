@@ -33,7 +33,7 @@ BasedOnStyle: google
 DerivePointerAlignment: false
 IncludeBlocks: Regroup
 IncludeCategories:
-  - Regex: '^<duckdb.*\.h>'
+  - Regex: '^<duckdb.*>'
     Priority: 2
   - Regex: '^<.*'
     Priority: 3
