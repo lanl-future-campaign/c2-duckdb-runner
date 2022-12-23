@@ -36,6 +36,7 @@
 #include "time.h"
 
 #include <duckdb.hpp>
+#include <duckdb/common/local_file_system.hpp>
 #include <duckdb/common/serializer/buffered_serializer.hpp>
 #include <duckdb/common/string_util.hpp>
 
@@ -54,6 +55,74 @@
 
 namespace c2 {
 
+class MonitoredFileHandle : public duckdb::FileHandle {
+ public:
+  std::unique_ptr<duckdb::FileHandle> base_;
+
+  MonitoredFileHandle(duckdb::FileSystem& file_system, const std::string& path,
+                      std::unique_ptr<duckdb::FileHandle> base)
+      : FileHandle(file_system, path), base_(std::move(base)) {}
+
+  ~MonitoredFileHandle() override { Close(); }
+
+  void Close() override {
+    if (base_) {
+      base_->Close();
+    }
+  };
+};
+
+class MonitoredFileSystem : public duckdb::FileSystem {
+ public:
+  explicit MonitoredFileSystem(std::unique_ptr<duckdb::FileSystem> base)
+      : base_(std::move(base)) {}
+
+  std::unique_ptr<duckdb::FileHandle> OpenFile(
+      const std::string& path, uint8_t flags, duckdb::FileLockType lock,
+      duckdb::FileCompressionType compression,
+      duckdb::FileOpener* opener) override {
+    std::unique_ptr<duckdb::FileHandle> r =
+        base_->OpenFile(path, flags, lock, compression, opener);
+    return std::make_unique<MonitoredFileHandle>(*this, path, std::move(r));
+  }
+
+  int64_t GetFileSize(duckdb::FileHandle& handle) override {
+    return base_->GetFileSize(
+        *dynamic_cast<MonitoredFileHandle&>(handle).base_);
+  }
+
+  void Read(duckdb::FileHandle& handle, void* buffer, int64_t nr_bytes,
+            idx_t location) override {
+    base_->Read(*dynamic_cast<MonitoredFileHandle&>(handle).base_, buffer,
+                nr_bytes, location);
+  }
+
+  time_t GetLastModifiedTime(duckdb::FileHandle& handle) override {
+    return base_->GetLastModifiedTime(handle);
+  }
+
+  std::vector<std::string> Glob(const std::string& path,
+                                duckdb::FileOpener* opener) override {
+    return base_->Glob(path, opener);
+  }
+
+  void RegisterSubSystem(duckdb::FileCompressionType compression_type,
+                         std::unique_ptr<FileSystem> sub_fs) override {
+    // Ignore
+  }
+
+  bool CanSeek() override { return base_->CanSeek(); }
+
+  bool OnDiskFile(duckdb::FileHandle& handle) override {
+    return base_->OnDiskFile(*dynamic_cast<MonitoredFileHandle&>(handle).base_);
+  }
+
+  std::string GetName() const override { return "MonitoredFileSystem"; }
+
+ private:
+  std::unique_ptr<duckdb::FileSystem> base_;
+};
+
 std::string ToSql(const std::string& filename, const char* filter) {
   char tmp[500];
   snprintf(tmp, sizeof(tmp), "SELECT * FROM '%s' WHERE %s", filename.c_str(),
@@ -65,6 +134,9 @@ int RunQuery(const std::string& filename, const char* filter, int print = 1,
              int print_binary = 1) {
   int nrows = 0;
   duckdb::DBConfig conf;
+  conf.file_system = std::make_unique<MonitoredFileSystem>(
+      std::make_unique<duckdb::LocalFileSystem>());
+  conf.maximum_threads = 1;
   duckdb::DuckDB db(nullptr, &conf);
   duckdb::Connection con(db);
   duckdb::BufferedSerializer ser(1024 * 1024);
