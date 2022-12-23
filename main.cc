@@ -36,10 +36,12 @@
 #include "time.h"
 
 #include <duckdb.hpp>
+#include <duckdb/common/string_util.hpp>
 
 #include <dirent.h>
 #include <errno.h>
 #include <getopt.h>
+#include <map>
 #include <stddef.h>
 #include <stdexcept>
 #include <stdio.h>
@@ -181,14 +183,76 @@ void process_dir(const char* datadir, const char* filter, int j) {
   runner.Wait();
   const uint64_t end = CurrentMicros();
   fprintf(stderr, "Predicate: %s\n", filter);
+  fprintf(stderr, "Threads: %d\n", j);
   fprintf(stderr, "Query time: %.2f s\n", double(end - start) / 1000000);
   fprintf(stderr, "Total rows: %d\n", runner.total());
   fprintf(stderr, "Done\n");
 }
 
+/*
+ * Usage: ./duckdb-runner data_dir
+ */
 int main(int argc, char* argv[]) {
+  const char* ke = "0.5";
+  {
+    const char* env = getenv("Env_ke");
+    if (env && env[0]) {
+      ke = env;
+    }
+  }
+  int j = 32;
+  {
+    const char* env = getenv("Env_jobs");
+    if (env && env[0]) {
+      j = atoi(env);
+      if (j < 1) {
+        j = 1;
+      }
+    }
+  }
+  std::map<std::string, struct iostats> diskstats;
+  {
+    const char* env = getenv("Env_mon_disks");
+    if (env && env[0]) {
+#ifdef __linux__
+      std::vector<std::string> disks = duckdb::StringUtil::Split(env, ",");
+      for (const auto& disk : disks) {
+        char path[50];
+        snprintf(path, sizeof(path), "/sys/block/%s/stat", disk.c_str());
+        struct iostats stats;
+        memset(&stats, 0, sizeof(stats));
+        GetDiskStats(path, &stats);
+        diskstats.emplace(disk, stats);
+      }
+#else
+      fprintf(stderr, "WARN: DISK STATS MON NOT ENABLED\n");
+#endif
+    }
+  }
   char tmp[50];
-  snprintf(tmp, sizeof(tmp), "ke > %s", argv[2]);
-  process_dir(argv[1], tmp, 32);
+  snprintf(tmp, sizeof(tmp), "ke > %s", ke);
+  process_dir(argv[1], tmp, j);
+  long long total_ops = 0, total_sectors = 0, total_ticks = 0, diff = 0;
+  for (const auto& it : diskstats) {
+    char path[50];
+    snprintf(path, sizeof(path), "/sys/block/%s/stat", it.first.c_str());
+    struct iostats stats;
+    memset(&stats, 0, sizeof(stats));
+    GetDiskStats(path, &stats);
+    diff = stats.read_ops - it.second.read_ops;
+    fprintf(stderr, "%s_read_ops: %lld\n", path, diff);
+    total_ops += diff;
+    diff = stats.read_sectors - it.second.read_sectors;
+    fprintf(stderr, "%s_read_sectors: %lld\n", path, diff);
+    total_sectors += diff;
+    diff = stats.read_ticks - it.second.read_ticks;
+    fprintf(stderr, "%s_read_ticks: %lld ms\n", path, diff);
+    total_ticks += diff;
+  }
+  if (total_ops != 0) {
+    fprintf(stderr, "Total_read_ops: %lld\n", total_ops);
+    fprintf(stderr, "Total_read_sectors: %lld\n", total_sectors);
+    fprintf(stderr, "Total_read_ticks: %lld ms\n", total_ticks);
+  }
   return 0;
 }
