@@ -36,6 +36,7 @@
 #include "time.h"
 
 #include <duckdb.hpp>
+#include <duckdb/common/serializer/buffered_serializer.hpp>
 #include <duckdb/common/string_util.hpp>
 
 #include <dirent.h>
@@ -60,15 +61,29 @@ std::string ToSql(const std::string& filename, const char* filter) {
   return tmp;
 }
 
-int RunQuery(const std::string& filename, const char* filter) {
+int RunQuery(const std::string& filename, const char* filter, int print = 1,
+             int print_binary = 1) {
   int nrows = 0;
   duckdb::DBConfig conf;
   duckdb::DuckDB db(nullptr, &conf);
   duckdb::Connection con(db);
+  duckdb::BufferedSerializer ser(1024 * 1024);
   std::unique_ptr<duckdb::QueryResult> r =
       con.SendQuery(ToSql(filename, filter));
   std::unique_ptr<duckdb::DataChunk> d = r->FetchRaw();
   while (d) {
+    if (print) {
+      if (print_binary) {
+        ser.Reset();
+        for (idx_t i = 0; i < d->ColumnCount(); i++) {
+          d->data[i].Serialize(d->size(), ser);
+        }
+        fwrite(ser.blob.data.get(), ser.blob.size, 1, stdout);
+        fflush(stdout);
+      } else {
+        d->Print();
+      }
+    }
     nrows += int(d->size());
     d = r->FetchRaw();
   }
