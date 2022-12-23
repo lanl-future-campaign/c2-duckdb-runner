@@ -31,7 +31,9 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#include "iostats.h"
 #include "pthread-helper.h"
+#include "time.h"
 
 #include <duckdb.hpp>
 
@@ -162,8 +164,9 @@ void process_dir(const char* datadir, const char* filter, int j) {
     fprintf(stderr, "Fail to open data dir %s: %s\n", datadir, strerror(errno));
     exit(EXIT_FAILURE);
   }
+  const uint64_t start = CurrentMicros();
   std::string scratch = datadir;
-  size_t scratch_prefix = scratch.length();
+  const size_t scratch_prefix = scratch.length();
   struct dirent* entry = readdir(dir);
   while (entry) {
     if (entry->d_type == DT_REG) {
@@ -176,7 +179,9 @@ void process_dir(const char* datadir, const char* filter, int j) {
   }
   closedir(dir);
   runner.Wait();
-  fprintf(stderr, "Query Predicate: %s\n", filter);
+  const uint64_t end = CurrentMicros();
+  fprintf(stderr, "Predicate: %s\n", filter);
+  fprintf(stderr, "Query time: %.2f s\n", double(end - start) / 1000000);
   fprintf(stderr, "Total rows: %d\n", runner.total());
   fprintf(stderr, "Done\n");
 }
