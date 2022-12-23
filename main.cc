@@ -55,13 +55,23 @@
 
 namespace c2 {
 
+struct ReadStats {
+  ReadStats() : read_ops(0), read_bytes(0) {}
+  // Number of read operations
+  uint64_t read_ops;
+  // Number of bytes read
+  uint64_t read_bytes;
+};
+
 class MonitoredFileHandle : public duckdb::FileHandle {
  public:
   std::unique_ptr<duckdb::FileHandle> base_;
+  ReadStats* stats_;
 
   MonitoredFileHandle(duckdb::FileSystem& file_system, const std::string& path,
-                      std::unique_ptr<duckdb::FileHandle> base)
-      : FileHandle(file_system, path), base_(std::move(base)) {}
+                      std::unique_ptr<duckdb::FileHandle> base,
+                      ReadStats* stats)
+      : FileHandle(file_system, path), base_(std::move(base)), stats_(stats) {}
 
   ~MonitoredFileHandle() override { Close(); }
 
@@ -83,7 +93,10 @@ class MonitoredFileSystem : public duckdb::FileSystem {
       duckdb::FileOpener* opener) override {
     std::unique_ptr<duckdb::FileHandle> r =
         base_->OpenFile(path, flags, lock, compression, opener);
-    return std::make_unique<MonitoredFileHandle>(*this, path, std::move(r));
+    ReadStats* const mystats = new ReadStats();
+    stats_.push_back(mystats);
+    return std::make_unique<MonitoredFileHandle>(*this, path, std::move(r),
+                                                 mystats);
   }
 
   int64_t GetFileSize(duckdb::FileHandle& handle) override {
@@ -93,8 +106,10 @@ class MonitoredFileSystem : public duckdb::FileSystem {
 
   void Read(duckdb::FileHandle& handle, void* buffer, int64_t nr_bytes,
             idx_t location) override {
-    base_->Read(*dynamic_cast<MonitoredFileHandle&>(handle).base_, buffer,
-                nr_bytes, location);
+    MonitoredFileHandle* h = &dynamic_cast<MonitoredFileHandle&>(handle);
+    base_->Read(*h->base_, buffer, nr_bytes, location);
+    h->stats_->read_bytes += nr_bytes;
+    h->stats_->read_ops += 1;
   }
 
   time_t GetLastModifiedTime(duckdb::FileHandle& handle) override {
@@ -119,7 +134,30 @@ class MonitoredFileSystem : public duckdb::FileSystem {
 
   std::string GetName() const override { return "MonitoredFileSystem"; }
 
+  uint64_t GetTotalReadOps() const {
+    uint64_t ops = 0;
+    for (ReadStats* it : stats_) {
+      ops += it->read_ops;
+    }
+    return ops;
+  }
+
+  uint64_t GetTotalReadBytes() const {
+    uint64_t bytes = 0;
+    for (ReadStats* it : stats_) {
+      bytes += it->read_bytes;
+    }
+    return bytes;
+  }
+
+  ~MonitoredFileSystem() override {
+    for (ReadStats* it : stats_) {
+      delete it;
+    }
+  }
+
  private:
+  std::vector<ReadStats*> stats_;
   std::unique_ptr<duckdb::FileSystem> base_;
 };
 
@@ -130,8 +168,8 @@ std::string ToSql(const std::string& filename, const char* filter) {
   return tmp;
 }
 
-int RunQuery(const std::string& filename, const char* filter, int print = 1,
-             int print_binary = 1) {
+int RunQuery(ReadStats* stats, const std::string& filename, const char* filter,
+             int print = 1, int print_binary = 1) {
   int nrows = 0;
   duckdb::DBConfig conf;
   conf.file_system = std::make_unique<MonitoredFileSystem>(
@@ -159,6 +197,10 @@ int RunQuery(const std::string& filename, const char* filter, int print = 1,
     nrows += int(d->size());
     d = r->FetchRaw();
   }
+  MonitoredFileSystem* fs =
+      &dynamic_cast<MonitoredFileSystem&>(db.GetFileSystem());
+  stats->read_bytes = fs->GetTotalReadBytes();
+  stats->read_ops = fs->GetTotalReadOps();
   return nrows;
 }
 
@@ -166,7 +208,9 @@ class QueryRunner {
  public:
   QueryRunner(const char* query_filter, int max_jobs);
   ~QueryRunner();
-  int total() const { return nrows_; }
+  uint64_t TotalReadOps() const { return stats_.read_ops; }
+  uint64_t TotalReadBytes() const { return stats_.read_bytes; }
+  int TotalRows() const { return nrows_; }
   void AddTask(const std::string& input_file);
   void Wait();
 
@@ -182,6 +226,7 @@ class QueryRunner {
   const char* const query_filter_;
   ThreadPool* const pool_;
   // State below protected by cv_;
+  ReadStats stats_;
   int nrows_;  // Total number of rows returned
   port::Mutex mu_;
   port::CondVar cv_;
@@ -217,9 +262,10 @@ void QueryRunner::AddTask(const std::string& input_file) {
 
 void QueryRunner::RunTask(void* arg) {
   Task* const t = static_cast<Task*>(arg);
+  ReadStats stats;
   int n = 0;
   try {
-    n = RunQuery(t->input_file, t->filter);
+    n = RunQuery(&stats, t->input_file, t->filter);
   } catch (const std::exception& e) {
     fprintf(stderr, "Error running query: %s\n", e.what());
   }
@@ -228,6 +274,8 @@ void QueryRunner::RunTask(void* arg) {
     MutexLock ml(&me->mu_);
     printf("scan::%s[%s] done!\n", t->input_file.c_str(), t->filter);
     me->bg_completed_++;
+    me->stats_.read_bytes += stats.read_bytes;
+    me->stats_.read_ops += stats.read_ops;
     me->nrows_ += n;
     me->cv_.SignalAll();
   }
@@ -272,7 +320,11 @@ void process_dir(const char* datadir, const char* filter, int j) {
   fprintf(stderr, "Predicate: %s\n", filter);
   fprintf(stderr, "Threads: %d\n", j);
   fprintf(stderr, "Query time: %.2f s\n", double(end - start) / 1000000);
-  fprintf(stderr, "Total rows: %d\n", runner.total());
+  fprintf(stderr, "Total rows: %d\n", runner.TotalRows());
+  fprintf(stderr, "Total read ops: %lld\n",
+          static_cast<long long unsigned>(runner.TotalReadOps()));
+  fprintf(stderr, "Total read bytes: %lld\n",
+          static_cast<long long unsigned>(runner.TotalReadBytes()));
   fprintf(stderr, "Done\n");
 }
 
