@@ -294,27 +294,34 @@ QueryRunner::~QueryRunner() {
 
 }  // namespace c2
 
-void process_dir(const char* datadir, const char* filter, int j) {
+void process_dir(char** datadir, int c, const char* filter, int j) {
   c2::QueryRunner runner(filter, j);
-  DIR* const dir = opendir(datadir);
-  if (!dir) {
-    fprintf(stderr, "Fail to open data dir %s: %s\n", datadir, strerror(errno));
-    exit(EXIT_FAILURE);
+  std::vector<std::string> files;
+  for (int i = 0; i < c; i++) {
+    std::string scratch = datadir[i];
+    const size_t scratch_prefix = scratch.length();
+    DIR* const dir = opendir(scratch.c_str());
+    if (!dir) {
+      fprintf(stderr, "Fail to open data dir %s: %s\n", datadir,
+              strerror(errno));
+      exit(EXIT_FAILURE);
+    }
+    struct dirent* entry = readdir(dir);
+    while (entry) {
+      if (entry->d_type == DT_REG) {
+        scratch.resize(scratch_prefix);
+        scratch += "/";
+        scratch += entry->d_name;
+        files.push_back(scratch);
+      }
+      entry = readdir(dir);
+    }
+    closedir(dir);
   }
   const uint64_t start = CurrentMicros();
-  std::string scratch = datadir;
-  const size_t scratch_prefix = scratch.length();
-  struct dirent* entry = readdir(dir);
-  while (entry) {
-    if (entry->d_type == DT_REG) {
-      scratch.resize(scratch_prefix);
-      scratch += "/";
-      scratch += entry->d_name;
-      runner.AddTask(scratch);
-    }
-    entry = readdir(dir);
+  for (const std::string& file : files) {
+    runner.AddTask(file);
   }
-  closedir(dir);
   runner.Wait();
   const uint64_t end = CurrentMicros();
   fprintf(stderr, "Predicate: %s\n", filter);
@@ -397,7 +404,7 @@ int main(int argc, char* argv[]) {
   }
   char tmp[50];
   snprintf(tmp, sizeof(tmp), "ke > %s", ke);
-  process_dir(argv[1], tmp, j);
+  process_dir(&argv[1], argc - 1, tmp, j);
   collect_and_report(diskstats);
   return 0;
 }
